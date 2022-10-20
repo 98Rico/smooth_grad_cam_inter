@@ -1,5 +1,7 @@
+from functools import singledispatchmethod
 import torch
 import torch.nn.functional as F
+import numpy as np
 
 from statistics import mode, mean
 
@@ -235,7 +237,7 @@ class GradCAMpp(CAM):
         return cam.data
 
 
-class SmoothGradCAMpp(CAM):
+class SmoothGradCAMpp_2(CAM):
     """ Smooth Grad CAM plus plus """
 
     def __init__(self, model, target_layer, n_samples=25, stdev_spread=0.15):
@@ -264,6 +266,7 @@ class SmoothGradCAMpp(CAM):
 
         indices = []
         probs = []
+        probs_for_average = []
 
         for i in range(self.n_samples):
             self.model.zero_grad()
@@ -271,22 +274,36 @@ class SmoothGradCAMpp(CAM):
             x_with_noise = torch.normal(mean=x, std=std_tensor)
             x_with_noise.requires_grad_()
 
-            score = self.model(x_with_noise)
+            scores = self.model(x_with_noise)
 
-            prob = F.softmax(score, dim=1)
+            for feature_number in range(scores.shape[1]):
 
-            if idx is None:
-                prob, idx = torch.max(prob, dim=1)
-                idx = idx.item()
+                score = scores[0,feature_number]
+
+
+                prob = torch.sigmoid(score)
+                score.backward(retain_graph=True)
                 probs.append(prob.item())
 
-            indices.append(idx)
+            #prob = F.softmax(score, dim=1)
 
-            score[0, idx].backward(retain_graph=True)
+            # if idx is None:
+            #     prob, idx = torch.max(prob, dim=1)
+            #     idx = idx.item()
+            #     probs.append(prob.item())
+
+            # indices.append(idx)
+
+            # score[0, idx].backward(retain_graph=True)
+            #score.backward(retain_graph=True)
 
             activations = self.values.activations
             gradients = self.values.gradients
             n, c, _, _ = gradients.shape
+            idx = np.argmax(probs)
+            probs_for_average.append(probs)
+            probs = []
+            
 
             # calculate alpha
             numerator = gradients.pow(2)
@@ -298,7 +315,7 @@ class SmoothGradCAMpp(CAM):
                 denominator != 0.0, denominator, torch.ones_like(denominator))
             alpha = numerator / (denominator + 1e-7)
 
-            relu_grad = F.relu(score[0, idx].exp() * gradients)
+            relu_grad = F.relu(scores[0, idx].exp() * gradients)
             weights = \
                 (alpha * relu_grad).view(n, c, -1).sum(-1).view(n, c, 1, 1)
 
@@ -314,10 +331,11 @@ class SmoothGradCAMpp(CAM):
                 total_cams += cam
 
         total_cams /= self.n_samples
-        idx = mode(indices)
-        prob = mean(probs)
+        #idx = mode(indices)
+        prob = mean(np.array(probs_for_average).flatten())
+        #prob = mean(probs_for_average)
 
-        print("predicted class ids {}\t probability {}".format(idx, prob))
+        print("Feature element ids {}\t probability {}".format(idx, prob))
 
         return total_cams.data, idx
 
